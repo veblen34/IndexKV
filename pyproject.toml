@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "indexkv"
+version = "0.1.0"
+description = "Unified index-only fair-comparison framework for KV-cache index-selection methods (open-source baselines on LongBench v2 and RULER)"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers>=5.0",
+    "datasets",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
