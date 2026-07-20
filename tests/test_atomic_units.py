@@ -17,7 +17,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from indexkv.methods.chunkkv import ChunkKV
-from indexkv.methods.selfindexing import SelfIndexing
+from indexkv.methods.selfindexing import SelfIndexing, _two_bit_minmax
 from indexkv.methods.wave_index import WaveIndex, WaveIndexData
 from indexkv.types import LayerSelection, MethodConfig
 
@@ -183,6 +183,59 @@ class AtomicUnitTests(unittest.TestCase):
         self.assertEqual(
             selected_ids(sel), set(scores[0].topk(5).indices.tolist())
         )
+
+    def test_selfindexing_uses_upstream_median_centering(self) -> None:
+        method = SelfIndexing()
+        keys = torch.arange(N * 8, dtype=torch.float32).reshape(1, N, 8) + 1
+        centered = method.build(keys, keys, make_cfg(0))
+        raw = method.build(
+            keys, keys, make_cfg(0, key_centering="none")
+        )
+
+        expected_median = keys.median(dim=1, keepdim=True).values
+        self.assertTrue(torch.equal(centered.key_median, expected_median))
+        self.assertTrue(torch.equal(raw.key_median, torch.zeros_like(expected_median)))
+        # Every uncentered coordinate is positive, while centered early tokens
+        # occupy the negative sign orthant.
+        self.assertTrue(bool((raw.codes == 15).all()))
+        self.assertTrue(bool((centered.codes[:, :4] == 0).all()))
+
+    def test_selfindexing_two_bit_codec_is_explicit_and_finite(self) -> None:
+        method = SelfIndexing()
+        torch.manual_seed(7)
+        keys = torch.randn(1, N, 32)
+        values = torch.randn(1, 1, 5, 32)
+        gathered_keys = torch.randn_like(values)
+        positions = torch.arange(5)
+
+        exact_index = method.build(keys, None, make_cfg(0))
+        k_exact, v_exact = method.transform_selected_kv(
+            exact_index, gathered_keys, values, positions, make_cfg(5)
+        )
+        self.assertIs(k_exact, gathered_keys)
+        self.assertIs(v_exact, values)
+
+        quant_index = method.build(
+            keys, None, make_cfg(0, emulate_2bit_kv=True)
+        )
+        k_quant, v_quant = method.transform_selected_kv(
+            quant_index,
+            gathered_keys,
+            values,
+            positions,
+            make_cfg(5, emulate_2bit_kv=True),
+        )
+        self.assertEqual(k_quant.shape, gathered_keys.shape)
+        self.assertEqual(v_quant.shape, values.shape)
+        self.assertTrue(bool(torch.isfinite(k_quant).all()))
+        self.assertTrue(bool(torch.isfinite(v_quant).all()))
+        self.assertFalse(torch.equal(k_quant, gathered_keys))
+        self.assertFalse(torch.equal(v_quant, values))
+
+        constant = torch.full((1, 1, 1, 32), 3.25)
+        self.assertTrue(torch.equal(
+            _two_bit_minmax(constant, magnitude=False), constant
+        ))
 
     def test_wave_index_returns_unbroken_index_clusters(self) -> None:
         method = WaveIndex()

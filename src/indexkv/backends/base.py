@@ -81,6 +81,28 @@ class SelectionProvider:
     def mask_for(self, layer_idx: int, q: torch.Tensor) -> Optional[torch.Tensor]:
         raise NotImplementedError
 
+    def has_kv_transform(self, layer_idx: int) -> bool:
+        """Return whether this layer needs a non-identity KV transform."""
+        return False
+
+    def transform_selected_kv(
+        self,
+        layer_idx: int,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Optionally transform gathered KV before attention.
+
+        The default is identity, which preserves the framework's exact-KV
+        comparison contract.  Source-fidelity experiments may opt into a
+        method-provided numerical codec emulation.  ``positions`` contains the
+        absolute cache positions represented by the gathered sequence axis.
+        Such emulation changes quality only: it does not model packed-cache
+        memory use or fused-kernel performance.
+        """
+        return k, v
+
 
 class ModelBackend:
     """Interface every model backend implements."""

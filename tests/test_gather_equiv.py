@@ -168,6 +168,25 @@ def test_direct_gather_never_calls_repeat_kv() -> None:
         llama_backend.repeat_kv = original
 
 
+def test_direct_gather_exposes_selected_positions_to_kv_transform() -> None:
+    q, k, v = _case_tensors(8, 2, torch.float32, torch.device("cpu"))
+    allow = _make_allow("shared_partial", 8, torch.device("cpu"))
+    expected_positions = torch.nonzero(
+        allow[0, 0, 0], as_tuple=False
+    ).flatten()
+    seen = {}
+
+    def zero_value_transform(k_sel, v_sel, positions):
+        seen["positions"] = positions.clone()
+        return k_sel, torch.zeros_like(v_sel)
+
+    output = llama_backend._gather_sdpa(
+        q, k, v, allow, kv_transform=zero_value_transform
+    )
+    assert torch.equal(seen["positions"], expected_positions)
+    assert torch.equal(output, torch.zeros_like(output))
+
+
 def test_sparse_forward_fast_avoids_repeat_and_matches_slow() -> None:
     H_q, H_kv, head_dim, width, cache_len = 8, 2, 4, 32, 9
 
@@ -295,6 +314,7 @@ def test_zero_selection_is_rejected_explicitly() -> None:
 def main() -> None:
     test_direct_gather_matches_full_width_reference()
     test_direct_gather_never_calls_repeat_kv()
+    test_direct_gather_exposes_selected_positions_to_kv_transform()
     test_sparse_forward_fast_avoids_repeat_and_matches_slow()
     test_zero_selection_is_rejected_explicitly()
     print("all direct-GQA gather equivalence checks passed")

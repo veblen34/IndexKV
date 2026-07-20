@@ -55,6 +55,20 @@ python scripts/run_longbench2.py \
 
 方法旋钮用 `--set 方法.参数=值`,例如 `--set hata.rbits=256 range_search.sample_size=256`。
 
+Self-Indexing 默认按上游实现，在构建 sign-orthant index 前对 key 做逐
+channel prompt median centering。可用
+`--set selfindexing.key_centering=none` 做消融。统一比较仍默认使用精确
+KV；若只需复现上游低比特 KV 对质量的数值影响，可显式设置：
+
+```bash
+--dtype float16 --set selfindexing.emulate_2bit_kv=true
+```
+
+该选项模拟上游每 token、每 32 channel 的 2-bit key-magnitude/value
+量化—反量化；不会实际压缩缓存，也不调用上游 fused kernel，因此不能用它
+报告 2-bit 显存或系统速度。启用后也不再是所有方法共享 exact-KV 的纯
+index-only 比较，输出 manifest 会通过 method override 保留这一配置。
+
 ## 评测忠实度
 
 - **RULER**:打分(`qa_*` 用 part-match,其余 all-match、控制符清洗、逐任务 `max_new_tokens`)与 kvpress / NVIDIA RULER 逐字一致,prompt 与 kvpress `pipeline.preprocess` 同样套 chat template。

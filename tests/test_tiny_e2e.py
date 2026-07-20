@@ -26,7 +26,7 @@ if LlamaConfig is not None:
 
 H_KV = 2
 H_Q = 4
-D_HEAD = 16
+D_HEAD = 32
 LAYERS = 4
 DENSE_PREFIX = 2
 VOCAB_SIZE = 128
@@ -177,7 +177,10 @@ class TinyLlamaE2ETests(unittest.TestCase):
                         "kmeans_iter": 2,
                         "assignment_chunk_size": 16,
                     },
-                    "selfindexing": {"chunk_size": 8},
+                    "selfindexing": {
+                        "chunk_size": 8,
+                        "emulate_2bit_kv": True,
+                    },
                     "chunkkv": {
                         "chunk_length": 8,
                         "kernel_size": 5,
