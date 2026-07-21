@@ -369,6 +369,28 @@ class PerStepProvider(_StatsMixin, SelectionProvider):
             self._selection_timer.stop(timing)
         return mask
 
+    def has_kv_transform(self, layer_idx: int) -> bool:
+        index = self.indices.get(layer_idx)
+        return bool(
+            index is not None
+            and self.method.has_kv_transform(index, self.cfgs[layer_idx])
+        )
+
+    @torch.no_grad()
+    def transform_selected_kv(
+        self,
+        layer_idx: int,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        index = self.indices.get(layer_idx)
+        if index is None:
+            return k, v
+        return self.method.transform_selected_kv(
+            index, k, v, positions, self.cfgs[layer_idx]
+        )
+
 
 @torch.no_grad()
 def make_provider(

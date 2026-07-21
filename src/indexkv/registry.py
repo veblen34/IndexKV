@@ -47,6 +47,27 @@ class IndexMethod:
     def select(self, index, Q, cfg: MethodConfig) -> LayerSelection:
         raise NotImplementedError
 
+    def has_kv_transform(self, index, cfg: MethodConfig) -> bool:
+        """Return whether the optional gathered-KV hook is active."""
+        return False
+
+    def transform_selected_kv(
+        self,
+        index,
+        k,
+        v,
+        positions,
+        cfg: MethodConfig,
+    ):
+        """Optional numerical KV transform after sparse gather.
+
+        Index methods are exact-KV by default.  Adapters may override this for
+        an explicitly requested source-fidelity codec emulation; the backend
+        still retains the exact cache, so this hook must not be used to claim
+        packed-cache memory or kernel speedups.
+        """
+        return k, v
+
 
 METHODS: Dict[str, Type[IndexMethod]] = {}
 

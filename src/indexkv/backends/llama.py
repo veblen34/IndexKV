@@ -391,7 +391,7 @@ def _sdpa_gqa(q, k, v, attn_mask=None):
 
 
 @torch.no_grad()
-def _gather_sdpa(q, k, v, allow):
+def _gather_sdpa(q, k, v, allow, kv_transform=None):
     """Sparse decode directly from the unrepeated (1, H_kv, T_k, D) cache.
 
     Shared masks gather each selected token once per KV head and use native GQA.
@@ -414,11 +414,15 @@ def _gather_sdpa(q, k, v, allow):
     if a.shape[0] == 1:
         count = int(a.sum().item())
         if count == T_k:
-            return _sdpa_gqa(q, k, v)
-        idx = torch.nonzero(a[0], as_tuple=False).flatten()
-        gidx = idx.view(1, 1, count, 1).expand(1, H_kv, count, D)
-        k_sel = torch.gather(k, 2, gidx)
-        v_sel = torch.gather(v, 2, gidx)
+            idx = torch.arange(T_k, device=q.device)
+            k_sel, v_sel = k, v
+        else:
+            idx = torch.nonzero(a[0], as_tuple=False).flatten()
+            gidx = idx.view(1, 1, count, 1).expand(1, H_kv, count, D)
+            k_sel = torch.gather(k, 2, gidx)
+            v_sel = torch.gather(v, 2, gidx)
+        if kv_transform is not None:
+            k_sel, v_sel = kv_transform(k_sel, v_sel, idx)
         return _sdpa_gqa(q, k_sel, v_sel)
 
     counts = a.sum(dim=-1)
@@ -432,6 +436,8 @@ def _gather_sdpa(q, k, v, allow):
     # construct an H_q*T_k repeat before selection.
     k_sel = k[0, kv_head[:, None], idx].unsqueeze(0)
     v_sel = v[0, kv_head[:, None], idx].unsqueeze(0)
+    if kv_transform is not None:
+        k_sel, v_sel = kv_transform(k_sel, v_sel, idx)
     add = None
     if not bool(keep.all()):
         add = torch.zeros(1, H_q, 1, M, dtype=q.dtype, device=q.device)
@@ -527,15 +533,43 @@ class _SparseAttn:
                     elif allow.shape[-1] > T_k:
                         allow = allow[..., :T_k]
 
+            transform_selected_kv = None
+            if ctx.provider is not None:
+                has_kv_transform = getattr(
+                    ctx.provider, "has_kv_transform", lambda _: False
+                )
+                if has_kv_transform(layer_idx):
+                    transform_selected_kv = getattr(
+                        ctx.provider, "transform_selected_kv", None
+                    )
             if allow is not None and ctx.fast:
                 # Directly gather from H_kv cache. At decode q_len==1 the causal
                 # mask allows all past positions, so allow is the only constraint.
-                out = _gather_sdpa(q, k, v, allow)
+                out = _gather_sdpa(
+                    q,
+                    k,
+                    v,
+                    allow,
+                    kv_transform=(
+                        None
+                        if transform_selected_kv is None
+                        else lambda k_sel, v_sel, positions: (
+                            transform_selected_kv(
+                                layer_idx, k_sel, v_sel, positions
+                            )
+                        )
+                    ),
+                )
             else:
                 # Preserve the legacy full-width path for dense prefill/decode and
                 # explicit fast=False equivalence checks.
                 if allow is not None:
                     _validate_gather_inputs(q, k, v, allow)
+                    if transform_selected_kv is not None:
+                        positions = torch.arange(T_k, device=q.device)
+                        k, v = transform_selected_kv(
+                            layer_idx, k, v, positions
+                        )
                 k_full = repeat_kv(k, kv_groups)
                 v_full = repeat_kv(v, kv_groups)
                 offset = T_k - q_len
