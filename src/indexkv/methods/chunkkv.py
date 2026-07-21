@@ -80,18 +80,23 @@ class ChunkKV(IndexMethod):
                 chunk_length=chunk_length,
             )
 
-        grouped_queries = Q.float().reshape(
+        # Match kvpress SnapKV numerical semantics: QK is evaluated in the
+        # model/capture dtype, softmax accumulates in FP32, and its result is
+        # cast back to the query dtype before pooling and chunk aggregation.
+        grouped_queries = Q.reshape(
             H_kv, cfg.group_size, W, D
         )
         logits = torch.einsum(
-            "hgtd,hnd->hgtn", grouped_queries, K.float()
+            "hgtd,hnd->hgtn", grouped_queries, K
         ).reshape(H_q, W, N) / math.sqrt(D)
         query_row = torch.arange(W, device=K.device).view(-1, 1)
         key_col = torch.arange(N, device=K.device).view(1, -1)
         logits.masked_fill_(
             key_col > query_row + (N - W), float("-inf")
         )
-        attention = logits.softmax(dim=-1)
+        attention = logits.softmax(
+            dim=-1, dtype=torch.float32
+        ).to(grouped_queries.dtype)
 
         prefix_len = N - W
         if prefix_len:
@@ -108,21 +113,37 @@ class ChunkKV(IndexMethod):
             high_score = token_scores.max() + 1.0
         else:
             token_scores = torch.empty(
-                H_kv, 0, dtype=torch.float32, device=K.device
+                H_kv, 0, dtype=grouped_queries.dtype, device=K.device
             )
-            high_score = torch.tensor(1.0, device=K.device)
+            high_score = torch.tensor(
+                1.0, dtype=grouped_queries.dtype, device=K.device
+            )
 
         all_scores = torch.empty(
-            H_kv, N, dtype=torch.float32, device=K.device
+            H_kv, N, dtype=grouped_queries.dtype, device=K.device
         )
         all_scores[:, :prefix_len] = token_scores
         all_scores[:, prefix_len:] = high_score
         global_scores = all_scores.sum(dim=0)
 
-        cumulative = F.pad(global_scores.cumsum(dim=0), (1, 0))
-        chunk_scores = (
-            cumulative[blocks[:, 1]] - cumulative[blocks[:, 0]]
-        ) / (blocks[:, 1] - blocks[:, 0]).to(torch.float32)
+        # Use the same direct per-chunk mean as kvpress. A full-sequence BF16
+        # prefix sum followed by subtraction both changes reduction order and
+        # loses substantial precision for late chunks.
+        eligible_scores = global_scores[lo:hi]
+        num_complete = eligible_scores.numel() // chunk_length
+        complete_end = num_complete * chunk_length
+        chunk_parts = []
+        if num_complete:
+            chunk_parts.append(
+                eligible_scores[:complete_end]
+                .reshape(num_complete, chunk_length)
+                .mean(dim=-1)
+            )
+        if complete_end < eligible_scores.numel():
+            chunk_parts.append(
+                eligible_scores[complete_end:].mean().reshape(1)
+            )
+        chunk_scores = torch.cat(chunk_parts)
         order = chunk_scores.argsort(descending=True, stable=True)
         return ChunkKVIndex(
             blocks=blocks,
